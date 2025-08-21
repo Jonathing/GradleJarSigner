@@ -18,70 +18,79 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Objects;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
-import org.codehaus.groovy.runtime.InvokerHelper;
+import org.codehaus.groovy.runtime.StringGroovyMethods;
 import org.gradle.api.Action;
-import org.gradle.api.Task;
+import org.gradle.api.DefaultTask;
+import org.gradle.api.Project;
+import org.gradle.api.file.ArchiveOperations;
 import org.gradle.api.file.RegularFile;
+import org.gradle.api.file.RegularFileProperty;
 import org.gradle.api.provider.Provider;
-import org.gradle.api.tasks.TaskInputs;
+import org.gradle.api.tasks.InputFile;
+import org.gradle.api.tasks.TaskAction;
 import org.gradle.api.file.FileTreeElement;
 import org.gradle.api.file.FileVisitDetails;
 import org.gradle.api.file.FileVisitor;
 import org.gradle.api.model.ObjectFactory;
 import org.gradle.api.specs.Spec;
+import org.gradle.api.tasks.TaskProvider;
+import org.gradle.api.tasks.bundling.AbstractArchiveTask;
 import org.gradle.api.tasks.bundling.Zip;
 import org.gradle.api.tasks.util.PatternFilterable;
 import org.gradle.api.tasks.util.PatternSet;
 
-import groovy.util.MapEntry;
 import org.jetbrains.annotations.Nullable;
 
 import javax.inject.Inject;
 
-abstract class SignTaskImpl implements SignTaskInternal {
+abstract class SignTaskImpl extends DefaultTask implements SignTaskInternal {
     private final JarSignerInfoContainer container;
-    private final Zip parent;
-    private final PatternSet patternSet = new PatternSet();
+    private final PatternSet patternSet;
+
+    protected abstract @InputFile RegularFileProperty getInputJar();
+    protected abstract @InputFile RegularFileProperty getOutputJar();
+    protected abstract @InputFile RegularFileProperty getOutputOriginal();
 
     protected abstract @Inject ObjectFactory getObjects();
+    protected abstract @Inject ArchiveOperations getArchiveOperations();
 
-    SignTaskImpl(JarSignerInfoContainer container, Zip parent, @Nullable Action<? super SignTask> config) {
-        this.parent = parent;
+    static TaskProvider<? extends SignTask> register(Project project, JarSignerInfoContainer container, TaskProvider<? extends Zip> parent, @Nullable Action<? super SignTask> cfg) {
+        var ret = project.getTasks().register("jarsign" + StringGroovyMethods.capitalize(parent.getName()), SignTaskImpl.class, task -> {
+            task.getInputJar().set(parent.map(AbstractArchiveTask::getArchiveFile).map(Provider::get));
 
-        this.container = this.getObjects().newInstance(JarSignerInfoContainer.class, this.parent.getProject());
+            container.fill(task.container);
 
-        container.fill(this.container);
-        if (config != null)
-            config.execute(this);
-        this.addProperties();
-        this.parent.doLast(this::signSafe);
+            task.getOutputs().upToDateWhen(it -> parent.map(zip -> zip.getOutputs().getUpToDateSpec().isSatisfiedBy(zip)).getOrElse(false));
+
+            if (cfg != null)
+                cfg.execute(task);
+        });
+        parent.configure(task -> task.finalizedBy(ret));
+        return ret;
     }
 
-    private void addProperties() {
-        TaskInputs in = this.parent.getInputs();
-        if (!patternSet.isEmpty()) {
-            in.property("signJar.patternSet.excludes", patternSet.getExcludes());
-            in.property("signJar.patternSet.includes", patternSet.getIncludes());
-        }
-        in.property("signJar.alias", this.container.alias).optional(true);
-        in.property("signJar.storePass", this.container.storePass).optional(true);
-        in.property("signJar.keyPass", this.container.keyPass).optional(true);
-        in.property("signJar.keyStoreData", this.container.keyStoreData).optional(true);
-        if (this.container.keyStoreFile.isPresent())
-            in.file(this.container.keyStoreFile);
+    @Inject
+    public SignTaskImpl() {
+        this.container = this.getObjects().newInstance(JarSignerInfoContainer.class);
+        this.patternSet = this.getObjects().newInstance(PatternSet.class);
+
+        this.getOutputJar().convention(this.getInputJar());
+        this.getOutputOriginal().fileProvider(this.getInputJar().map(RegularFile::getAsFile).map(it -> new File(it.getParentFile(), it.getName() + ".original")));
+
+        this.onlyIf(
+            "If missing key information, input jar will be unsigned",
+            task -> ((SignTaskImpl) task).hasEnoughInfo()
+        );
     }
 
-    private <T extends Task> void signSafe(T task) {
+    @TaskAction
+    void signSafe() {
         try {
-            if (hasEnoughInfo())
-                this.sign(task);
-            else
-                task.getLogger().warn("Jar will be unsigned, missing key information");
+            this.sign();
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -94,33 +103,12 @@ abstract class SignTaskImpl implements SignTaskInternal {
                (this.container.keyStoreData.isPresent() || this.container.keyStoreFile.isPresent());
     }
 
-    @SuppressWarnings("unchecked")
-    private static File getTaskArchiveFile(Zip task) {
-        try {
-            // Try getting the new thing first, to avoid potential deprecation methods
-            Provider<RegularFile> archiveFile = (Provider<RegularFile>) Objects.requireNonNull(
-                InvokerHelper.getProperty(task, "archiveFile"),
-                "Could not find Zip.archiveFile property. Must be in older Gradle."
-            );
-            return archiveFile.get().getAsFile();
-        } catch (Exception suppressed) {
-            // In older gradle? hope the old thing works.
-            try {
-                return task.getArchivePath();
-            } catch (Exception e) {
-                // Well, we tried. Add the first exception so it's not lost in the stacktrace.
-                e.addSuppressed(suppressed);
-                throw e;
-            }
-        }
-    }
+    private void sign() throws IOException {
+        final Map<String, UnsignedData> ignoredStuff = new HashMap<>();
 
-    private <T extends Task> void sign(T task) throws IOException {
-        final Map<String, Entry<byte[], Long>> ignoredStuff = new HashMap<>();
-
-        File tmp = this.parent.getTemporaryDir();
-        File output = getTaskArchiveFile(this.parent);
-        File original = new File(tmp, output.getName() + ".original");
+        File tmp = this.getTemporaryDir();
+        File output = this.getInputJar().get().getAsFile();
+        File original = this.getOutputOriginal().get().getAsFile();
         Files.move(output.toPath(), original.toPath(), StandardCopyOption.REPLACE_EXISTING);
 
         File input = original;
@@ -135,7 +123,7 @@ abstract class SignTaskImpl implements SignTaskInternal {
         if (this.container.keyStoreFile.isPresent()) {
             if (this.container.keyStoreData.isPresent())
                 throw new IllegalStateException("Both KeyStoreFile and KeyStoreData can not be set at the same time");
-            keyStore = this.container.keyStoreFile.get();
+            keyStore = this.container.keyStoreFile.getAsFile().get();
         } else if (this.container.keyStoreData.isPresent()) {
             byte[] data = Base64.getDecoder().decode(this.container.keyStoreData.get().getBytes(StandardCharsets.UTF_8));
             keyStore = new File(tmp, "keystore");
@@ -154,22 +142,25 @@ abstract class SignTaskImpl implements SignTaskInternal {
             map.put("keypass", this.container.keyPass.get());
 
         try {
-            this.parent.getProject().getAnt().invokeMethod("signjar", map);
+            this.getAnt().invokeMethod("signjar", map);
         } finally {
+            // Report a proper warning if keystore cannot be deleted
             if (!this.container.keyStoreFile.isPresent())
                 keyStore.delete();
         }
 
         if (!ignoredStuff.isEmpty())
-            writeOutputJar(output, getTaskArchiveFile(this.parent), ignoredStuff);
+            writeOutputJar(output, this.getInputJar().get().getAsFile(), ignoredStuff);
     }
 
-    private void processInputJar(File input, File output, final Map<String, Entry<byte[], Long>> unsigned) throws IOException {
+    private record UnsignedData(byte[] data, long lastModified) { }
+
+    private void processInputJar(File input, File output, final Map<String, UnsignedData> unsigned) throws IOException {
         final Spec<FileTreeElement> spec = patternSet.getAsSpec();
 
         output.getParentFile().mkdirs();
         try (JarOutputStream outs = new JarOutputStream(new BufferedOutputStream(new FileOutputStream(output)))){
-            this.parent.getProject().zipTree(input).visit(new FileVisitor() {
+            this.getArchiveOperations().zipTree(input).visit(new FileVisitor() {
                 @Override
                 public void visitDir(FileVisitDetails details) {
                     try {
@@ -182,7 +173,6 @@ abstract class SignTaskImpl implements SignTaskInternal {
                 }
 
                 @Override
-                @SuppressWarnings("unchecked")
                 public void visitFile(FileVisitDetails details) {
                     try {
                         if (spec.isSatisfiedBy(details)) {
@@ -200,7 +190,7 @@ abstract class SignTaskImpl implements SignTaskInternal {
                                 tmp.write(buf, 0, len);
 
                             byte[] data = tmp.toByteArray();
-                            unsigned.put(details.getPath(), new MapEntry(data, details.getLastModified()));
+                            unsigned.put(details.getPath(), new UnsignedData(data, details.getLastModified()));
                             stream.close();
                         }
                     } catch (IOException e) {
@@ -211,7 +201,7 @@ abstract class SignTaskImpl implements SignTaskInternal {
         }
     }
 
-    private void writeOutputJar(File signedJar, File outputJar, Map<String, Entry<byte[], Long>> unsigned) throws IOException {
+    private void writeOutputJar(File signedJar, File outputJar, Map<String, UnsignedData> unsigned) throws IOException {
         outputJar.getParentFile().mkdirs();
 
         JarOutputStream outs = new JarOutputStream(new BufferedOutputStream(new FileOutputStream(outputJar)));
@@ -234,11 +224,11 @@ abstract class SignTaskImpl implements SignTaskInternal {
         }
         base.close();
 
-        for (Entry<String, Entry<byte[], Long>> e : unsigned.entrySet()) {
+        for (Entry<String, UnsignedData> e : unsigned.entrySet()) {
             ZipEntry n = new ZipEntry(e.getKey());
-            n.setTime(e.getValue().getValue());
+            n.setTime(e.getValue().lastModified());
             outs.putNextEntry(n);
-            outs.write(e.getValue().getKey());
+            outs.write(e.getValue().data());
             outs.closeEntry();
         }
 

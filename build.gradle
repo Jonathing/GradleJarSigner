@@ -54,6 +54,15 @@ dependencies {
     implementation libs.gradleutils.shared
 }
 
+// Removes local Gradle API from compileOnly. This is a workaround for bugged plugins.
+// Publish Plugin: https://github.com/gradle/plugin-portal-requests/issues/260
+// Shadow:         https://github.com/GradleUp/shadow/pull/1422
+afterEvaluate { project ->
+    project.configurations.named(JavaPlugin.COMPILE_ONLY_CONFIGURATION_NAME) { compileOnly ->
+        compileOnly.dependencies.remove(project.dependencies.gradleApi())
+    }
+}
+
 license {
     header = rootProject.file('LICENSE-header.txt')
     newLine = false

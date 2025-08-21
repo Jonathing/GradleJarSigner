@@ -5,22 +5,33 @@
 package net.minecraftforge.gradlejarsigner;
 
 import org.gradle.api.Action;
+import org.gradle.api.provider.Provider;
+import org.gradle.api.provider.ProviderConvertible;
+import org.gradle.api.tasks.TaskProvider;
 import org.gradle.api.tasks.bundling.Zip;
 
 public interface GradleJarSignerExtension extends JarSignerInfo {
     String NAME = "jarSigner";
 
-    default SignTask sign(Zip task) {
+    default TaskProvider<? extends SignTask> sign(Zip task) {
         return this.sign(task, null);
     }
 
-    SignTask sign(Zip task, Action<? super SignTask> cfg);
+    TaskProvider<? extends SignTask> sign(Zip task, Action<? super SignTask> cfg);
 
-    void fromEnvironmentVariables();
+    default TaskProvider<? extends SignTask> sign(TaskProvider<? extends Zip> task) {
+        return this.sign(task, null);
+    }
 
-    void fromEnvironmentVariables(CharSequence prefix);
+    TaskProvider<? extends SignTask> sign(TaskProvider<? extends Zip> task, Action<? super SignTask> cfg);
 
     void autoDetect();
 
     void autoDetect(CharSequence prefix);
+
+    void autoDetect(Provider<? extends CharSequence> prefix);
+
+    default void autoDetect(ProviderConvertible<? extends CharSequence> prefix) {
+        this.autoDetect(prefix.asProvider());
+    }
 }

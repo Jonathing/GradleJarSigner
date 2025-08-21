@@ -4,8 +4,9 @@
  */
 package net.minecraftforge.gradlejarsigner;
 
-import org.gradle.api.Project;
+import org.gradle.api.file.ProjectLayout;
 import org.gradle.api.file.RegularFile;
+import org.gradle.api.file.RegularFileProperty;
 import org.gradle.api.model.ObjectFactory;
 import org.gradle.api.provider.Property;
 import org.gradle.api.provider.Provider;
@@ -17,26 +18,23 @@ import javax.inject.Inject;
 import java.io.File;
 
 abstract class JarSignerInfoContainer implements JarSignerInfo, HasPublicType {
-    private final Project project;
-
     final Property<String> alias;
     final Property<String> storePass;
     final Property<String> keyPass;
     final Property<String> keyStoreData;
-    final Property<File> keyStoreFile;
+    final RegularFileProperty keyStoreFile;
 
     protected abstract @Inject ObjectFactory getObjects();
+    protected abstract @Inject ProjectLayout getProjectLayout();
     protected abstract @Inject ProviderFactory getProviders();
 
     @Inject
-    public JarSignerInfoContainer(Project project) {
-        this.project = project;
-
+    public JarSignerInfoContainer() {
         this.alias = this.getObjects().property(String.class);
         this.storePass = this.getObjects().property(String.class);
         this.keyPass = this.getObjects().property(String.class);
         this.keyStoreData = this.getObjects().property(String.class);
-        this.keyStoreFile = this.getObjects().property(File.class);
+        this.keyStoreFile = this.getObjects().fileProperty();
     }
 
     @Override
@@ -95,7 +93,7 @@ abstract class JarSignerInfoContainer implements JarSignerInfo, HasPublicType {
 
     @Override
     public void setKeyStoreFile(Object value) {
-        this.keyStoreFile.set(this.project.file(value));
+        this.keyStoreFile.fileProvider(this.getProviders().provider(() -> this.getProjectLayout().files(value).getSingleFile()));
     }
 
     @Override
@@ -105,18 +103,18 @@ abstract class JarSignerInfoContainer implements JarSignerInfo, HasPublicType {
 
     @Override
     public void setKeyStoreFile(RegularFile value) {
-        this.keyStoreFile.set(this.getProviders().provider(value::getAsFile));
+        this.keyStoreFile.set(value);
     }
 
     @Override
     public void setKeyStoreFile(Provider<?> value) {
-        this.keyStoreFile.set(value.map(it -> {
+        this.keyStoreFile.fileProvider(value.map(it -> {
             if (it instanceof RegularFile)
                 return ((RegularFile) it).getAsFile();
             else if (it instanceof File)
                 return (File) it;
             else
-                return this.project.file(it);
+                return this.getProjectLayout().files(it).getSingleFile();
         }));
     }
 }

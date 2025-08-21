@@ -4,17 +4,22 @@
  */
 package net.minecraftforge.gradlejarsigner;
 
-import org.gradle.api.Plugin;
+import net.minecraftforge.gradleutils.shared.EnhancedPlugin;
 import org.gradle.api.Project;
 
 import javax.inject.Inject;
 
-abstract class GradleJarSignerPlugin implements Plugin<Project> {
+abstract class GradleJarSignerPlugin extends EnhancedPlugin<Project> {
+    static final String NAME = "jarSigner";
+    static final String DISPLAY_NAME = "Gradle Jar Signer";
+
     @Inject
-    public GradleJarSignerPlugin() { }
+    public GradleJarSignerPlugin() {
+        super(NAME, DISPLAY_NAME);
+    }
 
     @Override
-    public void apply(Project target) {
+    public void setup(Project target) {
         target.getExtensions().create(GradleJarSignerExtension.NAME, GradleJarSignerExtensionImpl.class, target);
     }
 }
